@@ -14,7 +14,7 @@ load_dotenv()
 DB_NAME = "abisso_db"
 COLLECTION_NAME = "chat_history"
 STATE_COLLECTION = "game_state" # La nuova collezione dedicata allo stato del giocatore
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 class AbissoEngine:
     """
@@ -22,21 +22,22 @@ class AbissoEngine:
     L'ho strutturata così per separare il 'cervello' del gioco dall'interfaccia utente (Streamlit).
     """
     def __init__(self):
-        self.api_key = os.getenv("GROQ_API_KEY")
+        # 1. RECUPERO LE CREDENZIALI H2O
+        self.api_key = os.getenv("H2O_API_KEY")
         self.mongo_uri = os.getenv("MONGO_URI")
         
         if not self.api_key or not self.mongo_uri:
-            raise ValueError("Errore Critico: Manca l'API Key o la stringa MongoDB!")
+            raise ValueError("Errore Critico: Manca l'API Key di H2O o la stringa MongoDB!")
 
-        # 1. Connessione diretta a MongoDB per gestire i dati 'custom' (l'inventario)
+        # 2. Connessione diretta a MongoDB
         self.client = MongoClient(self.mongo_uri)
         self.db = self.client[DB_NAME]
         self.state_db = self.db[STATE_COLLECTION] 
 
-        # 2. Inizializzo l'Intelligenza Artificiale
+        # 3. INIZIALIZZO L'IA (Puntando ai server di H2O Enterprise)
         self.llm = ChatOpenAI(
             api_key=self.api_key,
-            base_url="https://api.groq.com/openai/v1",
+            base_url="https://h2ogpte.genai.h2o.ai/v1", # <--- Il nuovo "indirizzo" del cervello
             model=MODEL_NAME,
             temperature=0.7 
         )

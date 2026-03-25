@@ -1,0 +1,14 @@
+# Ambienti virtuali
+venv/
+.venv/
+env/
+
+# Segreti e configurazioni
+.env
+
+# Dati e database locali
+data/
+__pycache__/
+*.pyc
+
+.streamlit/

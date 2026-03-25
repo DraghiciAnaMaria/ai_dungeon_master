@@ -4,6 +4,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_mongodb import MongoDBChatMessageHistory
+from pymongo import MongoClient # <--- NUOVO IMPORT PER GESTIRE LO STATO
 
 # Carico le variabili d'ambiente. È la prima cosa che faccio perché senza chiavi l'app è morta.
 load_dotenv()
@@ -13,6 +14,7 @@ load_dotenv()
 # durante il deploy, lo faccio qui in un secondo.
 DB_NAME = "abisso_db"
 COLLECTION_NAME = "chat_history"
+TATE_COLLECTION = "game_state" # <---  COLLEZIONE PER L'INVENTARIO
 MODEL_NAME = "llama-3.3-70b-versatile"
 
 class AbissoEngine:
@@ -77,8 +79,30 @@ class AbissoEngine:
             database_name=DB_NAME,
             collection_name=COLLECTION_NAME,
         )
-
-    def esegui_turno(self, input_utente: str, session_id: str = "partita_default"):
+    
+def get_inventory(self, session_id: str) -> list:
+        """
+        Controlla se esiste una partita salvata. 
+        Se sì, restituisce l'inventario. Se è una partita nuova, crea l'inventario base.
+        """
+        # Cerco il documento della partita corrente
+        stato_partita = self.state_db.find_one({"session_id": session_id})
+        
+        if stato_partita and "inventory" in stato_partita:
+            return stato_partita["inventory"]
+        else:
+            # Setup Iniziale: il giocatore parte sempre con questi due oggetti
+            inventario_base = ["Fiammiferi", "Chiave arrugginita"]
+            
+            # Upsert=True significa: "Aggiorna se esiste, altrimenti crealo nuovo"
+            self.state_db.update_one(
+                {"session_id": session_id},
+                {"$set": {"inventory": inventario_base}},
+                upsert=True 
+            )
+            return inventario_base
+        
+def esegui_turno(self, input_utente: str, session_id: str = "partita_default"):
         """
         Questo è l'unico metodo che espongo all'esterno.
         Prende l'azione dell'utente e restituisce la risposta del DM, 

@@ -1,15 +1,18 @@
 import streamlit as st
 import uuid  # Importo uuid per generare identificatori unici universali
-from src.agent import gioca_turno, INCIPIT  # Importo il motore e l'incipit
+
+# Oltre alla funzione per giocare il turno, mi serve l'istanza principale del motore 
+# per poter interrogare direttamente il database sullo stato del giocatore.
+from src.agent import gioca_turno, INCIPIT, engine 
 from src.styles import apply_gothic_style
 
 # --- 1. CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Abisso DM", layout="wide")
 apply_gothic_style()
 
-# --- 2. GESTIONE DELLO STATO DELLA SESSIONE (Il ponte col Database) ---
-# Streamlit ricarica l'intera pagina 
-# a ogni interazione. Se non salvo l'ID nella "session_state", cambierebbe a ogni invio
+# --- 2. GESTIONE DELLO STATO DELLA SESSIONE ---
+# Streamlit ricarica l'intera pagina a ogni interazione. 
+# Se non salvo l'ID nella "session_state", cambierebbe a ogni invio
 
 # Genero un ID univoco per il giocatore appena entra nel sito, e lo conservo in memoria.
 if "session_id" not in st.session_state:
@@ -20,13 +23,23 @@ if "session_id" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": INCIPIT}]
 
-# --- 3. SIDEBAR (mostra l'identità della partita) ---
+# --- 3. SIDEBAR ( è Dinamica e connessa al DB) ---
 with st.sidebar:
     st.title("📜 Stato dell'Anima")
     st.markdown("---")
-    st.info("Inventario: Fiammiferi, Chiave arrugginita")
     
-    # Stampo l'ID partita 
+    # Recupero l'inventario dal database (collezione 'game_state')
+    # Uso l'ID univoco di questa sessione per assicurarmi di leggere gli oggetti giusti
+    inventario_lista = engine.get_inventory(st.session_state.session_id)
+    
+    # 2. Formatto i dati per la UI
+    # MongoDB mi restituisce una lista Python ["Oggetto A", "Oggetto B"]. 
+    inventario_testo = ", ".join(inventario_lista)
+    
+    # 3. Stampo l'inventario a schermo
+    st.info(f"Inventario: {inventario_testo}")
+    
+    # Stampo l'ID partita per trasparenza architetturale
     st.markdown("---")
     st.caption(f" ID Partita (Database): `{st.session_state.session_id}`")
 
@@ -51,7 +64,7 @@ if prompt := st.chat_input("Scrivi la tua azione..."):
     with st.chat_message("assistant"):
         with st.spinner("L'Abisso sussurra..."):
             
-           
+            # Passo alla logica di business NON SOLO il testo, ma anche l'ID UNIVOCO.
             risposta = gioca_turno(messaggio_utente=prompt, session_id=st.session_state.session_id)
             
             # 3. Mostro la risposta e la salvo nello stato della UI

@@ -50,7 +50,7 @@ class AbissoEngine:
             temperature=0.7 
         )
 
-        # 5. PROMPT (Nessuna "Chain" invisibile qui)
+        # 5. PROMPT 
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", "Sei un Dungeon Master spietato per un gioco di ruolo horror.\n"
                        "CONTESTO DAL MANUALE (Usa queste informazioni per descrivere l'ambiente): {contesto_rag}\n\n"
@@ -116,7 +116,7 @@ class AbissoEngine:
             messaggi_compilati = self.prompt.format_messages(
                 input=input_utente, 
                 inventario=inventario_str, 
-                contesto_rag=contesto_rag,
+                contesto_rag=contesto_str,  # <--- CORRETTO!
                 history=messaggi_precedenti
             )
 

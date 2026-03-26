@@ -1,6 +1,7 @@
 import os
 import re # Uso le espressioni regolari per estrarre comandi nascosti dal testo dell'IA
 from dotenv import load_dotenv 
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -60,7 +61,7 @@ class AbissoEngine:
                        "Se il giocatore perde, usa, o gli viene distrutto un oggetto, scrivi: [REMOVE: NomeOggetto]\n\n"
                        "Descrivi l'ambiente usando i 5 sensi. Termina chiedendo: 'Cosa fai?'"),
             MessagesPlaceholder(variable_name="history"),
-            ("human", "{input}")
+            MessagesPlaceholder(variable_name="input")
         ])
 
         self.chain = self.prompt | self.llm
@@ -125,7 +126,11 @@ class AbissoEngine:
 
             # 3. ESECUZIONE: Inietto sia l'inventario che il RAG
             risposta = self.agent_with_memory.invoke(
-                {"input": input_utente, "inventario": inventario_str, "contesto_rag": contesto_str},
+                {
+                    "input": [HumanMessage(content=input_utente)], # <--- IMPACCHETTA IL TESTO QUI
+                    "inventario": inventario_str, 
+                    "contesto_rag": contesto_str
+                },
                 config={"configurable": {"session_id": session_id}}
             )
 

@@ -2,6 +2,7 @@ import os
 import re
 from dotenv import load_dotenv 
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_mongodb import MongoDBChatMessageHistory
 from pymongo import MongoClient
@@ -117,8 +118,11 @@ class AbissoEngine:
             testo_ia = risposta.content
 
             # 5. SALVATAGGIO MANUALE NEL DB (Qui aggiriamo il bug di LangChain!)
-            storico_db.add_user_message(input_utente)
-            storico_db.add_ai_message(testo_ia)
+            messaggio_umano = HumanMessage(content=input_utente)
+            messaggio_ia = AIMessage(content=testo_ia)
+            
+            storico_db.add_message(messaggio_umano)
+            storico_db.add_message(messaggio_ia)
 
             # 6. GESTIONE INVENTARIO TRAMITE REGEX
             aggiunte = re.findall(r'\[ADD:\s*(.*?)\]', testo_ia)

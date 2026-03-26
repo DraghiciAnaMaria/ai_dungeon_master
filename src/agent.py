@@ -22,12 +22,24 @@ class AbissoEngine:
     L'ho strutturata così per separare il 'cervello' del gioco dall'interfaccia utente (Streamlit).
     """
     def __init__(self):
-        # 1. RECUPERO LE CREDENZIALI H2O
+        # 1. RECUPERO LE CREDENZIALI (Metodo Bulletproof)
         self.api_key = os.getenv("H2O_API_KEY")
         self.mongo_uri = os.getenv("MONGO_URI")
         
+        # Se os.getenv fallisce (siamo su Streamlit Cloud), usiamo st.secrets
         if not self.api_key or not self.mongo_uri:
-            raise ValueError("Errore Critico: Manca l'API Key di H2O o la stringa MongoDB!")
+            try:
+                import streamlit as st
+                self.api_key = st.secrets["H2O_API_KEY"]
+                self.mongo_uri = st.secrets["MONGO_URI"]
+            except Exception:
+                pass # Ignoriamo l'errore qui, ci pensa il blocco sotto a bloccare tutto
+
+        # Controllo finale
+        if not self.api_key:
+            raise ValueError("🚨 ERRORE: Manca H2O_API_KEY!")
+        if not self.mongo_uri:
+            raise ValueError("🚨 ERRORE: Manca MONGO_URI!")
 
         # 2. Connessione diretta a MongoDB
         self.client = MongoClient(self.mongo_uri)

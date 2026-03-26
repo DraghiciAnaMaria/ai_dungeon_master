@@ -1,7 +1,19 @@
+# --- CORE & IA ---
 openai
 python-dotenv
 langchain
 langchain-openai
+
+# --- INTERFACCIA WEB ---
 streamlit
+
+# --- DATABASE & STATO  ---
 pymongo
 langchain-mongodb
+
+# --- RAG & VETTORI ---
+langchain-community
+langchain-huggingface
+pypdf
+faiss-cpu
+sentence-transformers

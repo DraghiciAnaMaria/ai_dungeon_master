@@ -6,6 +6,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_mongodb import MongoDBChatMessageHistory
 from pymongo import MongoClient
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # Inizializzo le variabili d'ambiente prima di fare qualsiasi altra cosa
 load_dotenv()
@@ -33,7 +35,9 @@ class AbissoEngine:
         self.client = MongoClient(self.mongo_uri)
         self.db = self.client[DB_NAME]
         self.state_db = self.db[STATE_COLLECTION] 
-
+        # Carico la memoria a lungo termine (FAISS)
+        self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.vector_store = FAISS.load_local("vector_store", self.embeddings, allow_dangerous_deserialization=True)
         # 3. INIZIALIZZO L'IA (Puntando ai server di H2O Enterprise)
         self.llm = ChatOpenAI(
             api_key=self.api_key,
@@ -48,13 +52,14 @@ class AbissoEngine:
         # Inoltre, istruisco l'IA a usare dei 'codici' che io potrò intercettare col Python.
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", "Sei un Dungeon Master spietato per un gioco di ruolo horror.\n"
+                       "CONTESTO DAL MANUALE (Usa queste informazioni per descrivere l'ambiente): {contesto_rag}\n\n"
                        "ATTENZIONE - INVENTARIO DEL GIOCATORE: {inventario}\n"
                        "Il giocatore possiede SOLO questi oggetti. Non fargli usare cose che non ha.\n\n"
                        "REGOLE DI SISTEMA PER L'INVENTARIO:\n"
                        "Se il giocatore trova, ruba o riceve un nuovo oggetto, devi scrivere alla fine della tua risposta esattamente: [ADD: NomeOggetto]\n"
                        "Se il giocatore perde, usa, o gli viene distrutto un oggetto, scrivi: [REMOVE: NomeOggetto]\n\n"
                        "Descrivi l'ambiente usando i 5 sensi. Termina chiedendo: 'Cosa fai?'"),
-            MessagesPlaceholder(variable_name="history"), # Qui LangChain mette la vecchia chat
+            MessagesPlaceholder(variable_name="history"),
             ("human", "{input}")
         ])
 
@@ -109,18 +114,22 @@ class AbissoEngine:
         interroga l'IA, intercetta i comandi e restituisce la risposta pulita.
         """
         try:
-            # 1. PREPARAZIONE: Leggo cosa ha in tasca l'utente in questo momento
+            # 1. PREPARAZIONE INVENTARIO
             inventario_lista = self.get_inventory(session_id)
             inventario_str = ", ".join(inventario_lista) if inventario_lista else "Vuoto (non hai nulla)"
 
-            # 2. ESECUZIONE: Invio il prompt compilato con le variabili aggiornate
+            # 2. PREPARAZIONE RAG (Cerco nel PDF cosa c'entra con quello che ha scritto l'utente)
+            # Prende i 2 frammenti più simili al testo dell'utente
+            frammenti_trovati = self.vector_store.similarity_search(input_utente, k=2) 
+            contesto_str = "\n".join([doc.page_content for doc in frammenti_trovati])
+
+            # 3. ESECUZIONE: Inietto sia l'inventario che il RAG
             risposta = self.agent_with_memory.invoke(
-                {"input": input_utente, "inventario": inventario_str},
+                {"input": input_utente, "inventario": inventario_str, "contesto_rag": contesto_str},
                 config={"configurable": {"session_id": session_id}}
             )
-            testo_ia = risposta.content
 
-            # 3. INTERCETTAZIONE: Uso le regex per cercare i tag [ADD: ...] e [REMOVE: ...]
+            # INTERCETTAZIONE: Uso le regex per cercare i tag [ADD: ...] e [REMOVE: ...]
             # Se l'IA ha stampato quei codici, Python li cattura in queste due liste
             aggiunte = re.findall(r'\[ADD:\s*(.*?)\]', testo_ia)
             rimozioni = re.findall(r'\[REMOVE:\s*(.*?)\]', testo_ia)
@@ -131,7 +140,7 @@ class AbissoEngine:
             for oggetto in rimozioni:
                 self._modifica_inventario_db(session_id, "REMOVE", oggetto)
 
-            # 4. PULIZIA: Cancello i codici 'tecnici' dalla stringa per non rompere l'immersione del giocatore
+            # PULIZIA: Cancello i codici 'tecnici' dalla stringa per non rompere l'immersione del giocatore
             testo_pulito = re.sub(r'\[ADD:\s*.*?\]', '', testo_ia)
             testo_pulito = re.sub(r'\[REMOVE:\s*.*?\]', '', testo_pulito)
 

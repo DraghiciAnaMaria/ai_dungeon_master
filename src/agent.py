@@ -1,53 +1,67 @@
 import os
 import re
+import traceback
 from dotenv import load_dotenv 
-from openai import OpenAI  # <--- USIAMO IL CLIENT NATIVO (Antiproiettile!)
+from openai import OpenAI  
+from pymongo import MongoClient
+
+# Componenti LangChain (usati solo per quello che sanno fare bene: Data & RAG)
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_mongodb import MongoDBChatMessageHistory
-from pymongo import MongoClient
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
+# --- CONFIGURAZIONE COSTANTI (Scalabilità) ---
 DB_NAME = "abisso_db"
 COLLECTION_NAME = "chat_history"
 STATE_COLLECTION = "game_state" 
-MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+# Passiamo a Groq (Llama 3 8B) per stabilità e velocità
+MODEL_NAME = "llama3-8b-8192" 
+BASE_URL = "https://api.groq.com/openai/v1"
 
 class AbissoEngine:
+    """
+    Engine modulare per il Dungeon Master.
+    Architettura: RAG (FAISS) + NoSQL (MongoDB) + LLM (Provider agnostico via OpenAI Client).
+    """
     def __init__(self):
-        # 1. RECUPERO CREDENZIALI
-        self.api_key = os.getenv("H2O_API_KEY")
-        self.mongo_uri = os.getenv("MONGO_URI")
+        # 1. SETUP CREDENZIALI (Fallback tra env e streamlit secrets)
+        self.api_key = os.getenv("GROQ_API_KEY") or self._get_st_secret("GROQ_API_KEY")
+        self.mongo_uri = os.getenv("MONGO_URI") or self._get_st_secret("MONGO_URI")
         
         if not self.api_key or not self.mongo_uri:
-            try:
-                import streamlit as st
-                self.api_key = st.secrets["H2O_API_KEY"]
-                self.mongo_uri = st.secrets["MONGO_URI"]
-            except Exception:
-                pass
+            raise ValueError("🚨 MANCANO LE CHIAVI! Controlla .env o Streamlit Secrets.")
 
-        if not self.api_key: raise ValueError("🚨 ERRORE: Manca H2O_API_KEY!")
-        if not self.mongo_uri: raise ValueError("🚨 ERRORE: Manca MONGO_URI!")
-
-        # 2. CONNESSIONE DATABASES (MongoDB)
+        # 2. DATA LAYER (MongoDB)
         self.client = MongoClient(self.mongo_uri)
         self.db = self.client[DB_NAME]
         self.state_db = self.db[STATE_COLLECTION] 
 
-        # 3. CARICAMENTO CERVELLO RAG (FAISS)
+        # 3. KNOWLEDGE LAYER (RAG con FAISS)
+        # Usiamo embeddings locali per non pagare chiamate API extra
         self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        self.vector_store = FAISS.load_local("vector_store", self.embeddings, allow_dangerous_deserialization=True)
+        try:
+            self.vector_store = FAISS.load_local("vector_store", self.embeddings, allow_dangerous_deserialization=True)
+        except Exception as e:
+            print(f"⚠️ Errore caricamento Vector Store: {e}. Il RAG sarà disabilitato.")
+            self.vector_store = None
 
-        # 4. INIZIALIZZO L'IA NATIVA (Addio LangChain_OpenAI buggato!)
-        self.h2o_client = OpenAI(
-            api_key=self.api_key,
-            base_url="https://h2ogpte.genai.h2o.ai/v1"
-        )
+        # 4. INFERENCE LAYER (Client Nativo OpenAI)
+        # Disaccoppiato da LangChain per evitare errori di serializzazione (es. .model_dump())
+        self.ia_client = OpenAI(api_key=self.api_key, base_url=BASE_URL)
         
+    def _get_st_secret(self, key):
+        """Helper per recuperare segreti da Streamlit in produzione."""
+        try:
+            import streamlit as st
+            return st.secrets[key]
+        except: return None
+
     def _get_mongo_history(self, session_id: str):
+        """Recupera lo storico messaggi formattato per LangChain/MongoDB."""
         return MongoDBChatMessageHistory(
             connection_string=self.mongo_uri,
             session_id=session_id,
@@ -56,93 +70,85 @@ class AbissoEngine:
         )
     
     def get_inventory(self, session_id: str) -> list:
-        stato_partita = self.state_db.find_one({"session_id": session_id})
-        if stato_partita and "inventory" in stato_partita:
-            return stato_partita["inventory"]
-        else:
-            inventario_base = ["Fiammiferi", "Chiave arrugginita"]
-            self.state_db.update_one(
-                {"session_id": session_id},
-                {"$set": {"inventory": inventario_base}},
-                upsert=True 
-            )
-            return inventario_base
+        """Recupera l'inventario dal DB o inizializza il set base per nuovi player."""
+        doc = self.state_db.find_one({"session_id": session_id})
+        if doc and "inventory" in doc:
+            return doc["inventory"]
+        
+        initial_inv = ["Fiammiferi", "Chiave arrugginita"]
+        self.state_db.update_one({"session_id": session_id}, {"$set": {"inventory": initial_inv}}, upsert=True)
+        return initial_inv
 
-    def _modifica_inventario_db(self, session_id: str, azione: str, oggetto: str):
-        if azione == "ADD":
-            self.state_db.update_one({"session_id": session_id}, {"$push": {"inventory": oggetto}})
-        elif azione == "REMOVE":
-            self.state_db.update_one({"session_id": session_id}, {"$pull": {"inventory": oggetto}})
+    def _update_inventory_logic(self, session_id: str, text: str):
+        """Parsing della risposta IA per aggiornare il DB (Regex pattern: [ADD: x] o [REMOVE: x])."""
+        adds = re.findall(r'\[ADD:\s*(.*?)\]', text)
+        removes = re.findall(r'\[REMOVE:\s*(.*?)\]', text)
+
+        for item in adds:
+            self.state_db.update_one({"session_id": session_id}, {"$push": {"inventory": item}})
+        for item in removes:
+            self.state_db.update_one({"session_id": session_id}, {"$pull": {"inventory": item}})
 
     def esegui_turno(self, input_utente: str, session_id: str):
+        """Main Loop del turno: RAG -> Prompt -> LLM -> DB -> UI."""
         try:
-            # 1. PREPARAZIONE INVENTARIO E RAG
-            inventario_lista = self.get_inventory(session_id)
-            inventario_str = ", ".join(inventario_lista) if inventario_lista else "Vuoto (non hai nulla)"
-
-            frammenti_trovati = self.vector_store.similarity_search(input_utente, k=2) 
-            contesto_str = "\n".join([doc.page_content for doc in frammenti_trovati])
-
-            # 2. PREPARAZIONE MESSAGGI (Formato universale standard, non soggetto a crash)
-            messaggi_api = []
+            # --- PHASE 1: CONTEXT RETRIEVAL ---
+            inv_list = self.get_inventory(session_id)
+            inv_str = ", ".join(inv_list) if inv_list else "Vuoto"
             
-            testo_sistema = (
-                "Sei un Dungeon Master spietato per un gioco di ruolo horror.\n"
-                f"CONTESTO DAL MANUALE (Usa queste informazioni per descrivere l'ambiente): {contesto_str}\n\n"
-                f"ATTENZIONE - INVENTARIO DEL GIOCATORE: {inventario_str}\n"
-                "Il giocatore possiede SOLO questi oggetti. Non fargli usare cose che non ha.\n\n"
-                "REGOLE DI SISTEMA PER L'INVENTARIO:\n"
-                "Se il giocatore trova, ruba o riceve un nuovo oggetto, devi scrivere alla fine della tua risposta esattamente: [ADD: NomeOggetto]\n"
-                "Se il giocatore perde, usa, o gli viene distrutto un oggetto, scrivi: [REMOVE: NomeOggetto]\n\n"
-                "Descrivi l'ambiente usando i 5 sensi. Termina chiedendo: 'Cosa fai?'"
-            )
-            messaggi_api.append({"role": "system", "content": testo_sistema})
+            rag_context = ""
+            if self.vector_store:
+                docs = self.vector_store.similarity_search(input_utente, k=2)
+                rag_context = "\n".join([d.page_content for d in docs])
 
-            storico_db = self._get_mongo_history(session_id)
-            for msg in storico_db.messages:
-                if hasattr(msg, "content"):
-                    ruolo = "assistant" if getattr(msg, "type", "human") == "ai" else "user"
-                    messaggi_api.append({"role": ruolo, "content": str(msg.content)})
+            # --- PHASE 2: PROMPT ENGINEERING (Manual Construction) ---
+            messages = [
+                {"role": "system", "content": (
+                    "Sei un Dungeon Master horror spietato.\n"
+                    f"INFO MANUALE: {rag_context}\n"
+                    f"INVENTARIO ATTUALE: {inv_str}\n"
+                    "Usa i tag [ADD: Oggetto] o [REMOVE: Oggetto] per gestire l'inventario."
+                )}
+            ]
 
-            messaggi_api.append({"role": "user", "content": str(input_utente)})
+            # Iniezione dello storico (Sanitizzazione dei tipi)
+            history_manager = self._get_mongo_history(session_id)
+            for m in history_manager.messages:
+                role = "assistant" if isinstance(m, AIMessage) else "user"
+                messages.append({"role": role, "content": str(m.content)})
 
-            # 3. CHIAMATA DIRETTA E SICURA AL SERVER H2O
-            risposta = self.h2o_client.chat.completions.create(
+            messages.append({"role": "user", "content": input_utente})
+
+            # --- PHASE 3: ROBUST INFERENCE ---
+            response = self.ia_client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=messaggi_api,
-                temperature=0.7 
+                messages=messages,
+                temperature=0.7
             )
-            if hasattr(risposta, 'choices'):
-                    testo_ia = risposta.choices[0].message.content
-            elif isinstance(risposta, dict) and 'choices' in risposta:
-                    testo_ia = risposta['choices'][0]['message']['content']
-            elif isinstance(risposta, str):
-                    testo_ia = risposta  # Se l'API ci dà direttamente il testo, lo prendiamo così com'è!
+
+            # Duck Typing per gestire risposte sporche/HTML/stringhe grezze dai server
+            if hasattr(response, 'choices'):
+                ai_text = response.choices[0].message.content
+            elif isinstance(response, dict):
+                ai_text = response['choices'][0]['message']['content']
             else:
-                    testo_ia = str(risposta) # Qualsiasi altra cosa strana la forziamo a diventare testo
+                ai_text = str(response)
 
-            # 4. SALVATAGGIO IN MONGODB
-            storico_db.add_message(HumanMessage(content=str(input_utente)))
-            storico_db.add_message(AIMessage(content=testo_ia))
+            # --- PHASE 4: STATE PERSISTENCE ---
+            history_manager.add_message(HumanMessage(content=input_utente))
+            history_manager.add_message(AIMessage(content=ai_text))
+            self._update_inventory_logic(session_id, ai_text)
 
-            # 5. GESTIONE INVENTARIO TRAMITE REGEX
-            aggiunte = re.findall(r'\[ADD:\s*(.*?)\]', testo_ia)
-            rimozioni = re.findall(r'\[REMOVE:\s*(.*?)\]', testo_ia)
-
-            for oggetto in aggiunte: self._modifica_inventario_db(session_id, "ADD", oggetto)
-            for oggetto in rimozioni: self._modifica_inventario_db(session_id, "REMOVE", oggetto)
-
-            testo_pulito = re.sub(r'\[ADD:\s*.*?\]', '', testo_ia)
-            testo_pulito = re.sub(r'\[REMOVE:\s*.*?\]', '', testo_pulito)
-
-            return testo_pulito.strip()
+            # Pulizia dei tag tecnici prima di mostrare all'utente
+            clean_output = re.sub(r'\[(ADD|REMOVE):\s*.*?\]', '', ai_text).strip()
+            return clean_output
 
         except Exception as e:
-            import traceback
-            return f"[Errore di Sistema - L'Abisso è corrotto]: {e}\n{traceback.format_exc()}"
+            return f"🚨 [SYSTEM_CRASH]: {str(e)}\n{traceback.format_exc()}"
 
+# Singleton instance per l'app
 engine = AbissoEngine()
-INCIPIT = "Ti svegli sul pavimento freddo di una stanza di pietra. Senti l'odore metallico del sangue secco. Non c'è luce. Cosa fai?"
+INCIPIT = "Ti svegli nell'oscurità totale. L'Abisso ti osserva. Cosa fai?"
 
-def gioca_turno(messaggio_utente, session_id):
-    return engine.esegui_turno(messaggio_utente, session_id)
+def gioca_turno(msg, sid):
+    return engine.esegui_turno(msg, sid)

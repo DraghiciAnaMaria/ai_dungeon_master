@@ -19,7 +19,7 @@ COLLECTION_NAME = "chat_history"
 STATE_COLLECTION = "game_state" 
 
 # Passiamo a Groq (Llama 3 8B) per stabilità e velocità
-MODEL_NAME = "llama3-8b-8192" 
+MODEL_NAME = "llama-3.3-70b-versatile" 
 BASE_URL = "https://api.groq.com/openai/v1"
 
 class AbissoEngine:

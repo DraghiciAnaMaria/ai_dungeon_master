@@ -3,7 +3,6 @@ import re
 from dotenv import load_dotenv 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_mongodb import MongoDBChatMessageHistory
 from pymongo import MongoClient
 from langchain_community.vectorstores import FAISS
@@ -49,20 +48,7 @@ class AbissoEngine:
             model=MODEL_NAME,
             temperature=0.7 
         )
-
-        # 5. PROMPT 
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", "Sei un Dungeon Master spietato per un gioco di ruolo horror.\n"
-                       "CONTESTO DAL MANUALE (Usa queste informazioni per descrivere l'ambiente): {contesto_rag}\n\n"
-                       "ATTENZIONE - INVENTARIO DEL GIOCATORE: {inventario}\n"
-                       "Il giocatore possiede SOLO questi oggetti. Non fargli usare cose che non ha.\n\n"
-                       "REGOLE DI SISTEMA PER L'INVENTARIO:\n"
-                       "Se il giocatore trova, ruba o riceve un nuovo oggetto, devi scrivere alla fine della tua risposta esattamente: [ADD: NomeOggetto]\n"
-                       "Se il giocatore perde, usa, o gli viene distrutto un oggetto, scrivi: [REMOVE: NomeOggetto]\n\n"
-                       "Descrivi l'ambiente usando i 5 sensi. Termina chiedendo: 'Cosa fai?'"),
-            MessagesPlaceholder(variable_name="history"),
-            ("human", "{input}")
-        ])
+        # NOTA: Abbiamo distrutto il ChatPromptTemplate buggato di LangChain!
         
     def _get_mongo_history(self, session_id: str):
         return MongoDBChatMessageHistory(
@@ -93,52 +79,63 @@ class AbissoEngine:
 
     def esegui_turno(self, input_utente: str, session_id: str):
         try:
+            # 1. PREPARAZIONE INVENTARIO E RAG
             inventario_lista = self.get_inventory(session_id)
             inventario_str = ", ".join(inventario_lista) if inventario_lista else "Vuoto (non hai nulla)"
 
             frammenti_trovati = self.vector_store.similarity_search(input_utente, k=2) 
             contesto_str = "\n".join([doc.page_content for doc in frammenti_trovati])
 
-            storico_db = self._get_mongo_history(session_id)
+            # 2. COSTRUZIONE MANUALE E BLINDATA DEI MESSAGGI
+            messaggi_finali = []
             
-            # --- 1. SANITIZZAZIONE ESTREMA DEL DATABASE ---
-            # Ripuliamo qualsiasi schifezza o stringa salvata su MongoDB in passato
-            messaggi_precedenti = []
-            for msg in storico_db.messages:
-                if hasattr(msg, "content"):
-                    messaggi_precedenti.append(msg)
-                elif isinstance(msg, dict) and "content" in msg:
-                    messaggi_precedenti.append(HumanMessage(content=msg["content"]))
-                elif isinstance(msg, str):
-                    messaggi_precedenti.append(HumanMessage(content=msg))
-
-            # --- 2. COSTRUZIONE MANUALE DEL PROMPT ---
-            messaggi_compilati = self.prompt.format_messages(
-                input=input_utente, 
-                inventario=inventario_str, 
-                contesto_rag=contesto_str,  # <--- CORRETTO!
-                history=messaggi_precedenti
+            # A) Il System Prompt creato a mano (niente format_messages)
+            testo_sistema = (
+                "Sei un Dungeon Master spietato per un gioco di ruolo horror.\n"
+                f"CONTESTO DAL MANUALE (Usa queste informazioni per descrivere l'ambiente): {contesto_str}\n\n"
+                f"ATTENZIONE - INVENTARIO DEL GIOCATORE: {inventario_str}\n"
+                "Il giocatore possiede SOLO questi oggetti. Non fargli usare cose che non ha.\n\n"
+                "REGOLE DI SISTEMA PER L'INVENTARIO:\n"
+                "Se il giocatore trova, ruba o riceve un nuovo oggetto, devi scrivere alla fine della tua risposta esattamente: [ADD: NomeOggetto]\n"
+                "Se il giocatore perde, usa, o gli viene distrutto un oggetto, scrivi: [REMOVE: NomeOggetto]\n\n"
+                "Descrivi l'ambiente usando i 5 sensi. Termina chiedendo: 'Cosa fai?'"
             )
+            messaggi_finali.append(SystemMessage(content=testo_sistema))
 
-            # --- 3. DOPPIA VERIFICA ---
-            messaggi_puliti = []
-            for m in messaggi_compilati:
-                if isinstance(m, str):
-                    messaggi_puliti.append(HumanMessage(content=m))
+            # B) Aggiunta della cronologia da MongoDB ricreando gli oggetti freschi
+            storico_db = self._get_mongo_history(session_id)
+            for msg in storico_db.messages:
+                testo_passato = ""
+                tipo_passato = "human"
+                
+                # Estraiamo il testo ignorando i formati corrotti di LangChain
+                if hasattr(msg, "content"):
+                    testo_passato = str(msg.content)
+                    tipo_passato = getattr(msg, "type", "human")
+                elif isinstance(msg, dict):
+                    testo_passato = str(msg.get("content", ""))
+                    tipo_passato = msg.get("type", "human")
                 else:
-                    messaggi_puliti.append(m)
+                    testo_passato = str(msg)
+                    
+                # Ricreiamo un OGGETTO NUOVO E PULITO
+                if tipo_passato == "ai":
+                    messaggi_finali.append(AIMessage(content=testo_passato))
+                else:
+                    messaggi_finali.append(HumanMessage(content=testo_passato))
 
-            # --- 4. CHIAMATA DIRETTA E PURA AL MODELLO ---
-            # Senza l'uso di "chain" opache
-            risposta = self.llm.invoke(messaggi_puliti)
-            testo_ia = risposta.content
+            # C) Aggiunta del messaggio attuale
+            messaggi_finali.append(HumanMessage(content=str(input_utente)))
 
-            messaggio_umano = HumanMessage(content=input_utente)
-            messaggio_ia = AIMessage(content=testo_ia)
-            
-            storico_db.add_message(messaggio_umano)
-            storico_db.add_message(messaggio_ia)
+            # 3. CHIAMATA DIRETTA AL LLM (Nessuna chain intermediaria)
+            risposta = self.llm.invoke(messaggi_finali)
+            testo_ia = str(risposta.content)
 
+            # 4. SALVATAGGIO IN MONGODB
+            storico_db.add_message(HumanMessage(content=str(input_utente)))
+            storico_db.add_message(AIMessage(content=testo_ia))
+
+            # 5. GESTIONE INVENTARIO TRAMITE REGEX
             aggiunte = re.findall(r'\[ADD:\s*(.*?)\]', testo_ia)
             rimozioni = re.findall(r'\[REMOVE:\s*(.*?)\]', testo_ia)
 
@@ -151,7 +148,8 @@ class AbissoEngine:
             return testo_pulito.strip()
 
         except Exception as e:
-            return f"[Errore di Sistema - L'Abisso è corrotto]: {e}"
+            import traceback
+            return f"[Errore di Sistema - L'Abisso è corrotto]: {e}\n{traceback.format_exc()}"
 
 engine = AbissoEngine()
 INCIPIT = "Ti svegli sul pavimento freddo di una stanza di pietra. Senti l'odore metallico del sangue secco. Non c'è luce. Cosa fai?"

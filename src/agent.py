@@ -1,11 +1,10 @@
 import os
 import re
 import traceback
+import random # <--- Nuovo per i dadi
 from dotenv import load_dotenv 
 from openai import OpenAI  
 from pymongo import MongoClient
-
-# Componenti LangChain (usati solo per quello che sanno fare bene: Data & RAG)
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_mongodb import MongoDBChatMessageHistory
 from langchain_community.vectorstores import FAISS
@@ -13,142 +12,130 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# --- CONFIGURAZIONE COSTANTI (Scalabilità) ---
 DB_NAME = "abisso_db"
 COLLECTION_NAME = "chat_history"
 STATE_COLLECTION = "game_state" 
-
-# Passiamo a Groq (Llama 3 8B) per stabilità e velocità
 MODEL_NAME = "llama-3.3-70b-versatile" 
 BASE_URL = "https://api.groq.com/openai/v1"
 
 class AbissoEngine:
-    """
-    Engine modulare per il Dungeon Master.
-    Architettura: RAG (FAISS) + NoSQL (MongoDB) + LLM (Provider agnostico via OpenAI Client).
-    """
     def __init__(self):
-        # 1. SETUP CREDENZIALI (Fallback tra env e streamlit secrets)
         self.api_key = os.getenv("GROQ_API_KEY") or self._get_st_secret("GROQ_API_KEY")
         self.mongo_uri = os.getenv("MONGO_URI") or self._get_st_secret("MONGO_URI")
         
         if not self.api_key or not self.mongo_uri:
-            raise ValueError("🚨 MANCANO LE CHIAVI! Controlla .env o Streamlit Secrets.")
+            raise ValueError("🚨 MANCANO LE CHIAVI!")
 
-        # 2. DATA LAYER (MongoDB)
         self.client = MongoClient(self.mongo_uri)
         self.db = self.client[DB_NAME]
         self.state_db = self.db[STATE_COLLECTION] 
 
-        # 3. KNOWLEDGE LAYER (RAG con FAISS)
-        # Usiamo embeddings locali per non pagare chiamate API extra
         self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         try:
             self.vector_store = FAISS.load_local("vector_store", self.embeddings, allow_dangerous_deserialization=True)
-        except Exception as e:
-            print(f"⚠️ Errore caricamento Vector Store: {e}. Il RAG sarà disabilitato.")
+        except:
             self.vector_store = None
 
-        # 4. INFERENCE LAYER (Client Nativo OpenAI)
-        # Disaccoppiato da LangChain per evitare errori di serializzazione (es. .model_dump())
         self.ia_client = OpenAI(api_key=self.api_key, base_url=BASE_URL)
         
     def _get_st_secret(self, key):
-        """Helper per recuperare segreti da Streamlit in produzione."""
         try:
             import streamlit as st
             return st.secrets[key]
         except: return None
 
-    def _get_mongo_history(self, session_id: str):
-        """Recupera lo storico messaggi formattato per LangChain/MongoDB."""
-        return MongoDBChatMessageHistory(
-            connection_string=self.mongo_uri,
-            session_id=session_id,
-            database_name=DB_NAME,
-            collection_name=COLLECTION_NAME,
-        )
-    
-    def get_inventory(self, session_id: str) -> list:
-        """Recupera l'inventario dal DB o inizializza il set base per nuovi player."""
+    # --- NUOVO: GESTIONE STATO AVANZATO ---
+    def get_game_state(self, session_id: str):
+        """Recupera sanità, inventario e party dal DB."""
         doc = self.state_db.find_one({"session_id": session_id})
-        if doc and "inventory" in doc:
-            return doc["inventory"]
-        
-        initial_inv = ["Fiammiferi", "Chiave arrugginita"]
-        self.state_db.update_one({"session_id": session_id}, {"$set": {"inventory": initial_inv}}, upsert=True)
-        return initial_inv
+        if not doc:
+            doc = {
+                "session_id": session_id,
+                "inventory": ["Fiammiferi", "Chiave arrugginita"],
+                "sanita": 100,
+                "party": [] # Personaggi incontrati
+            }
+            self.state_db.insert_one(doc)
+        return doc
 
-    def _update_inventory_logic(self, session_id: str, text: str):
-        """Parsing della risposta IA per aggiornare il DB (Regex pattern: [ADD: x] o [REMOVE: x])."""
-        adds = re.findall(r'\[ADD:\s*(.*?)\]', text)
-        removes = re.findall(r'\[REMOVE:\s*(.*?)\]', text)
-
-        for item in adds:
-            self.state_db.update_one({"session_id": session_id}, {"$push": {"inventory": item}})
-        for item in removes:
-            self.state_db.update_one({"session_id": session_id}, {"$pull": {"inventory": item}})
+    def update_stat(self, session_id: str, field: str, value, op="$set"):
+        """Aggiorna genericamente un campo dello stato nel DB."""
+        self.state_db.update_one({"session_id": session_id}, {op: {field: value}})
 
     def esegui_turno(self, input_utente: str, session_id: str):
-        """Main Loop del turno: RAG -> Prompt -> LLM -> DB -> UI."""
         try:
-            # --- PHASE 1: CONTEXT RETRIEVAL ---
-            inv_list = self.get_inventory(session_id)
-            inv_str = ", ".join(inv_list) if inv_list else "Vuoto"
+            # 1. Recupero stato
+            stato = self.get_game_state(session_id)
+            inv_str = ", ".join(stato["inventory"])
+            party_str = ", ".join(stato["party"]) if stato["party"] else "Sei solo"
+            sanita = stato["sanita"]
             
             rag_context = ""
             if self.vector_store:
                 docs = self.vector_store.similarity_search(input_utente, k=2)
                 rag_context = "\n".join([d.page_content for d in docs])
 
-            # --- PHASE 2: PROMPT ENGINEERING (Manual Construction) ---
-            messages = [
-                {"role": "system", "content": (
-                    "Sei un Dungeon Master horror spietato.\n"
-                    f"INFO MANUALE: {rag_context}\n"
-                    f"INVENTARIO ATTUALE: {inv_str}\n"
-                    "Usa i tag [ADD: Oggetto] o [REMOVE: Oggetto] per gestire l'inventario."
-                )}
-            ]
+            # 2. Prompt con Dinamiche di Gruppo e Dadi
+            testo_sistema = (
+                "Sei un Dungeon Master horror spietato. Usa i manuali per i dettagli.\n"
+                f"MANUALE: {rag_context}\n"
+                f"SITUAZIONE PARTY: Inventario:[{inv_str}] | Sanità:[{sanita}%] | Compagni:[{party_str}]\n\n"
+                "REGOLE DINAMICHE:\n"
+                "- Se il giocatore incontra Emilia o Joe, scrivi alla fine: [MEET: Nome]\n"
+                "- Se l'azione è rischiosa o incerta, scrivi alla fine: [DICE_ROLL]\n"
+                "- Se il giocatore subisce uno shock, scrivi: [SANITY_LOSS: 10]\n"
+                "- Fai parlare Emilia (misteriosa/geroglifici) e Joe (soldato/impulsivo) se sono nel party.\n"
+                "- Usa i tag [ADD: oggetto] o [REMOVE: oggetto].\n"
+                "Descrivi in modo immersivo. Termina sempre con una domanda."
+            )
 
-            # Iniezione dello storico (Sanitizzazione dei tipi)
-            history_manager = self._get_mongo_history(session_id)
+            messages = [{"role": "system", "content": testo_sistema}]
+            history_manager = MongoDBChatMessageHistory(
+                connection_string=self.mongo_uri, session_id=session_id,
+                database_name=DB_NAME, collection_name=COLLECTION_NAME
+            )
             for m in history_manager.messages:
                 role = "assistant" if isinstance(m, AIMessage) else "user"
                 messages.append({"role": role, "content": str(m.content)})
-
             messages.append({"role": "user", "content": input_utente})
 
-            # --- PHASE 3: ROBUST INFERENCE ---
-            response = self.ia_client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=0.7
-            )
+            # 3. Chiamata API
+            response = self.ia_client.chat.completions.create(model=MODEL_NAME, messages=messages, temperature=0.8)
+            ai_text = response.choices[0].message.content
 
-            # Duck Typing per gestire risposte sporche/HTML/stringhe grezze dai server
-            if hasattr(response, 'choices'):
-                ai_text = response.choices[0].message.content
-            elif isinstance(response, dict):
-                ai_text = response['choices'][0]['message']['content']
-            else:
-                ai_text = str(response)
+            # 4. Parsing Logica (Incontri, Sanità, Inventario)
+            # Incontri
+            nuovi_amici = re.findall(r'\[MEET:\s*(.*?)\]', ai_text)
+            for amico in nuovi_amici:
+                if amico not in stato["party"]:
+                    self.update_stat(session_id, "party", amico, op="$push")
+            
+            # Sanità
+            perdite = re.findall(r'\[SANITY_LOSS:\s*(\d+)\]', ai_text)
+            for p in perdite:
+                self.update_stat(session_id, "sanita", -int(p), op="$inc")
 
-            # --- PHASE 4: STATE PERSISTENCE ---
+            # Inventario
+            adds = re.findall(r'\[ADD:\s*(.*?)\]', ai_text)
+            rems = re.findall(r'\[REMOVE:\s*(.*?)\]', ai_text)
+            for item in adds: self.update_stat(session_id, "inventory", item, op="$push")
+            for item in rems: self.update_stat(session_id, "inventory", item, op="$pull")
+
+            # 5. Salvataggio e Pulizia
             history_manager.add_message(HumanMessage(content=input_utente))
             history_manager.add_message(AIMessage(content=ai_text))
-            self._update_inventory_logic(session_id, ai_text)
-
-            # Pulizia dei tag tecnici prima di mostrare all'utente
-            clean_output = re.sub(r'\[(ADD|REMOVE):\s*.*?\]', '', ai_text).strip()
-            return clean_output
+            
+            # Puliamo TUTTI i tag tecnici prima di restituire il testo
+            clean_output = re.sub(r'\[.*?\]', '', ai_text).strip()
+            
+            # Passiamo il flag del dado all'interfaccia
+            needs_dice = "[DICE_ROLL]" in ai_text
+            
+            return {"testo": clean_output, "dice": needs_dice}
 
         except Exception as e:
-            return f"🚨 [SYSTEM_CRASH]: {str(e)}\n{traceback.format_exc()}"
+            return {"testo": f"🚨 [CRASH]: {str(e)}", "dice": False}
 
-# Singleton instance per l'app
 engine = AbissoEngine()
-INCIPIT = "Ti svegli nell'oscurità totale. L'Abisso ti osserva. Cosa fai?"
-
-def gioca_turno(messaggio_utente, session_id): # <-- Cambia i nomi qui
-    return engine.esegui_turno(messaggio_utente, session_id)
+def gioca_turno(msg, sid):
+    return engine.esegui_turno(msg, sid)

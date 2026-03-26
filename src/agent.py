@@ -150,5 +150,5 @@ class AbissoEngine:
 engine = AbissoEngine()
 INCIPIT = "Ti svegli nell'oscurità totale. L'Abisso ti osserva. Cosa fai?"
 
-def gioca_turno(msg, sid):
-    return engine.esegui_turno(msg, sid)
+def gioca_turno(messaggio_utente, session_id): # <-- Cambia i nomi qui
+    return engine.esegui_turno(messaggio_utente, session_id)

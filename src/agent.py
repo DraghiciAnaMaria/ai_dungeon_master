@@ -1,8 +1,8 @@
 import os
 import re
 from dotenv import load_dotenv 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from openai import OpenAI  # <--- USIAMO IL CLIENT NATIVO (Antiproiettile!)
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_mongodb import MongoDBChatMessageHistory
 from pymongo import MongoClient
 from langchain_community.vectorstores import FAISS
@@ -32,7 +32,7 @@ class AbissoEngine:
         if not self.api_key: raise ValueError("🚨 ERRORE: Manca H2O_API_KEY!")
         if not self.mongo_uri: raise ValueError("🚨 ERRORE: Manca MONGO_URI!")
 
-        # 2. CONNESSIONE DATABASES
+        # 2. CONNESSIONE DATABASES (MongoDB)
         self.client = MongoClient(self.mongo_uri)
         self.db = self.client[DB_NAME]
         self.state_db = self.db[STATE_COLLECTION] 
@@ -41,14 +41,11 @@ class AbissoEngine:
         self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         self.vector_store = FAISS.load_local("vector_store", self.embeddings, allow_dangerous_deserialization=True)
 
-        # 4. INIZIALIZZO L'IA
-        self.llm = ChatOpenAI(
+        # 4. INIZIALIZZO L'IA NATIVA (Addio LangChain_OpenAI buggato!)
+        self.h2o_client = OpenAI(
             api_key=self.api_key,
-            base_url="https://h2ogpte.genai.h2o.ai/v1",
-            model=MODEL_NAME,
-            temperature=0.7 
+            base_url="https://h2ogpte.genai.h2o.ai/v1"
         )
-        # NOTA: Abbiamo distrutto il ChatPromptTemplate buggato di LangChain!
         
     def _get_mongo_history(self, session_id: str):
         return MongoDBChatMessageHistory(
@@ -86,10 +83,9 @@ class AbissoEngine:
             frammenti_trovati = self.vector_store.similarity_search(input_utente, k=2) 
             contesto_str = "\n".join([doc.page_content for doc in frammenti_trovati])
 
-            # 2. COSTRUZIONE MANUALE E BLINDATA DEI MESSAGGI
-            messaggi_finali = []
+            # 2. PREPARAZIONE MESSAGGI (Formato universale standard, non soggetto a crash)
+            messaggi_api = []
             
-            # A) Il System Prompt creato a mano (niente format_messages)
             testo_sistema = (
                 "Sei un Dungeon Master spietato per un gioco di ruolo horror.\n"
                 f"CONTESTO DAL MANUALE (Usa queste informazioni per descrivere l'ambiente): {contesto_str}\n\n"
@@ -100,36 +96,23 @@ class AbissoEngine:
                 "Se il giocatore perde, usa, o gli viene distrutto un oggetto, scrivi: [REMOVE: NomeOggetto]\n\n"
                 "Descrivi l'ambiente usando i 5 sensi. Termina chiedendo: 'Cosa fai?'"
             )
-            messaggi_finali.append(SystemMessage(content=testo_sistema))
+            messaggi_api.append({"role": "system", "content": testo_sistema})
 
-            # B) Aggiunta della cronologia da MongoDB ricreando gli oggetti freschi
             storico_db = self._get_mongo_history(session_id)
             for msg in storico_db.messages:
-                testo_passato = ""
-                tipo_passato = "human"
-                
-                # Estraiamo il testo ignorando i formati corrotti di LangChain
                 if hasattr(msg, "content"):
-                    testo_passato = str(msg.content)
-                    tipo_passato = getattr(msg, "type", "human")
-                elif isinstance(msg, dict):
-                    testo_passato = str(msg.get("content", ""))
-                    tipo_passato = msg.get("type", "human")
-                else:
-                    testo_passato = str(msg)
-                    
-                # Ricreiamo un OGGETTO NUOVO E PULITO
-                if tipo_passato == "ai":
-                    messaggi_finali.append(AIMessage(content=testo_passato))
-                else:
-                    messaggi_finali.append(HumanMessage(content=testo_passato))
+                    ruolo = "assistant" if getattr(msg, "type", "human") == "ai" else "user"
+                    messaggi_api.append({"role": ruolo, "content": str(msg.content)})
 
-            # C) Aggiunta del messaggio attuale
-            messaggi_finali.append(HumanMessage(content=str(input_utente)))
+            messaggi_api.append({"role": "user", "content": str(input_utente)})
 
-            # 3. CHIAMATA DIRETTA AL LLM (Nessuna chain intermediaria)
-            risposta = self.llm.invoke(messaggi_finali)
-            testo_ia = str(risposta.content)
+            # 3. CHIAMATA DIRETTA E SICURA AL SERVER H2O
+            risposta = self.h2o_client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messaggi_api,
+                temperature=0.7 
+            )
+            testo_ia = risposta.choices[0].message.content
 
             # 4. SALVATAGGIO IN MONGODB
             storico_db.add_message(HumanMessage(content=str(input_utente)))

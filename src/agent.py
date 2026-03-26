@@ -2,7 +2,7 @@ import os
 import re
 from dotenv import load_dotenv 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_mongodb import MongoDBChatMessageHistory
 from pymongo import MongoClient
@@ -50,7 +50,7 @@ class AbissoEngine:
             temperature=0.7 
         )
 
-        # 5. PROMPT 
+        # 5. PROMPT (Nessuna "Chain" invisibile qui)
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", "Sei un Dungeon Master spietato per un gioco di ruolo horror.\n"
                        "CONTESTO DAL MANUALE (Usa queste informazioni per descrivere l'ambiente): {contesto_rag}\n\n"
@@ -63,9 +63,6 @@ class AbissoEngine:
             MessagesPlaceholder(variable_name="history"),
             ("human", "{input}")
         ])
-
-        # Creo la chain semplice 
-        self.chain = self.prompt | self.llm
         
     def _get_mongo_history(self, session_id: str):
         return MongoDBChatMessageHistory(
@@ -96,35 +93,52 @@ class AbissoEngine:
 
     def esegui_turno(self, input_utente: str, session_id: str):
         try:
-            # 1. PREPARAZIONE INVENTARIO
             inventario_lista = self.get_inventory(session_id)
             inventario_str = ", ".join(inventario_lista) if inventario_lista else "Vuoto (non hai nulla)"
 
-            # 2. PREPARAZIONE RAG
             frammenti_trovati = self.vector_store.similarity_search(input_utente, k=2) 
             contesto_str = "\n".join([doc.page_content for doc in frammenti_trovati])
 
-            # 3. RECUPERO STORICO MANUALE
             storico_db = self._get_mongo_history(session_id)
-            messaggi_precedenti = storico_db.messages
+            
+            # --- 1. SANITIZZAZIONE ESTREMA DEL DATABASE ---
+            # Ripuliamo qualsiasi schifezza o stringa salvata su MongoDB in passato
+            messaggi_precedenti = []
+            for msg in storico_db.messages:
+                if hasattr(msg, "content"):
+                    messaggi_precedenti.append(msg)
+                elif isinstance(msg, dict) and "content" in msg:
+                    messaggi_precedenti.append(HumanMessage(content=msg["content"]))
+                elif isinstance(msg, str):
+                    messaggi_precedenti.append(HumanMessage(content=msg))
 
-            # 4. ESECUZIONE DELLA CHAIN
-            risposta = self.chain.invoke({
-                "input": input_utente, 
-                "inventario": inventario_str, 
-                "contesto_rag": contesto_str,
-                "history": messaggi_precedenti
-            })
+            # --- 2. COSTRUZIONE MANUALE DEL PROMPT ---
+            messaggi_compilati = self.prompt.format_messages(
+                input=input_utente, 
+                inventario=inventario_str, 
+                contesto_rag=contesto_rag,
+                history=messaggi_precedenti
+            )
+
+            # --- 3. DOPPIA VERIFICA ---
+            messaggi_puliti = []
+            for m in messaggi_compilati:
+                if isinstance(m, str):
+                    messaggi_puliti.append(HumanMessage(content=m))
+                else:
+                    messaggi_puliti.append(m)
+
+            # --- 4. CHIAMATA DIRETTA E PURA AL MODELLO ---
+            # Senza l'uso di "chain" opache
+            risposta = self.llm.invoke(messaggi_puliti)
             testo_ia = risposta.content
 
-            # 5. SALVATAGGIO MANUALE NEL DB (Qui aggiriamo il bug di LangChain!)
             messaggio_umano = HumanMessage(content=input_utente)
             messaggio_ia = AIMessage(content=testo_ia)
             
             storico_db.add_message(messaggio_umano)
             storico_db.add_message(messaggio_ia)
 
-            # 6. GESTIONE INVENTARIO TRAMITE REGEX
             aggiunte = re.findall(r'\[ADD:\s*(.*?)\]', testo_ia)
             rimozioni = re.findall(r'\[REMOVE:\s*(.*?)\]', testo_ia)
 

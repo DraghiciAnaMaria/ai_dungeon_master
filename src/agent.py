@@ -112,7 +112,14 @@ class AbissoEngine:
                 messages=messaggi_api,
                 temperature=0.7 
             )
-            testo_ia = risposta.choices[0].message.content
+            if hasattr(risposta, 'choices'):
+                    testo_ia = risposta.choices[0].message.content
+            elif isinstance(risposta, dict) and 'choices' in risposta:
+                    testo_ia = risposta['choices'][0]['message']['content']
+            elif isinstance(risposta, str):
+                    testo_ia = risposta  # Se l'API ci dà direttamente il testo, lo prendiamo così com'è!
+            else:
+                    testo_ia = str(risposta) # Qualsiasi altra cosa strana la forziamo a diventare testo
 
             # 4. SALVATAGGIO IN MONGODB
             storico_db.add_message(HumanMessage(content=str(input_utente)))

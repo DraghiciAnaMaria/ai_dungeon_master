@@ -137,5 +137,7 @@ class AbissoEngine:
             return {"testo": f"🚨 [CRASH]: {str(e)}", "dice": False}
 
 engine = AbissoEngine()
+INCIPIT = "Ti svegli nell'oscurità totale. L'Abisso ti osserva. Cosa fai?"
+
 def gioca_turno(msg, sid):
     return engine.esegui_turno(msg, sid)

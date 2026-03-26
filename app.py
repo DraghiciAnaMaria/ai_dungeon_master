@@ -92,28 +92,37 @@ if "session_id" in st.session_state:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    # --- MECCANICA LANCIO DADI (Interruzione di Flusso) ---
+    # --- MECCANICA LANCIO DADI ---
     if st.session_state.get("attesa_dadi"):
         st.error("🎲 L'azione è incerta. L'Abisso richiede un tributo al caso.")
+        
+        # Un solo bottone!
         if st.button("LANCIA IL DADO (D20)", use_container_width=True):
             risultato = random.randint(1, 20)
             
-            # Logica esiti (Backend)
+            # 1. Chiamiamo l'engine per aggiornare i dati (Sanità, ecc.)
+            evento = engine.risolvi_lancio_dado(st.session_state.session_id, risultato)
+            
+            # 2. Mostriamo il feedback visivo immediato
             if risultato <= 5:
-                evento = "FALLIMENTO! Perdi 15 punti Sanità."
-                engine.update_stat(st.session_state.session_id, "sanita", -15, op="$inc")
+                st.error(f"⚠️ Risultato: {risultato} - {evento}")
             elif risultato >= 15:
-                evento = "SUCCESSO! Ricevi un'intuizione profetica."
+                st.success(f"🌟 Risultato: {risultato} - {evento}")
             else:
-                evento = "ESITO INCERTO: Ti salvi per un pelo."
+                st.warning(f"⚖️ Risultato: {risultato} - {evento}")
 
-            # Inviamo l'esito al DM come se fosse un'azione di sistema
-            with st.spinner("Il DM osserva il risultato..."):
+            # 3. Inviamo l'esito al DM per la narrazione
+            with st.spinner("L'Abisso osserva il risultato..."):
+                # Passiamo il risultato al LLM (gioca_turno ora restituisce un dict)
                 res_dice = gioca_turno(f"[RISULTATO DADO: {risultato} - {evento}]", st.session_state.session_id)
+                
+                # Aggiungiamo i messaggi alla chat
+                st.session_state.messages.append({"role": "user", "content": f"🎲 Lancio Dado: {risultato}"})
                 st.session_state.messages.append({"role": "assistant", "content": res_dice["testo"]})
-                st.session_state.attesa_dadi = False # Sblocchiamo la chat
+                
+                # Reset dello stato
+                st.session_state.attesa_dadi = False
                 st.rerun()
-
     # --- INPUT NORMALE (Attivo solo se non aspettiamo i dadi) ---
     else:
         if prompt := st.chat_input("Cosa fai?"):

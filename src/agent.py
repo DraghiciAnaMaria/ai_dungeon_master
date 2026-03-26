@@ -61,7 +61,16 @@ class AbissoEngine:
     def update_stat(self, session_id: str, field: str, value, op="$set"):
         """Aggiorna genericamente un campo dello stato nel DB."""
         self.state_db.update_one({"session_id": session_id}, {op: {field: value}})
-
+    
+    def risolvi_lancio_dado(self, session_id, risultato):
+        if risultato <= 5:
+            self.update_stat(session_id, "sanita", -15, op="$inc")
+            return "FALLIMENTO DISASTROSO! L'Abisso ti ha segnato."
+        elif risultato >= 15:
+            return "SUCCESSO ECCEZIONALE! Uno spiraglio di luce ti salva."
+        else:
+            return "ESITO INCERTO: Ti salvi, ma il prezzo è l'incertezza."
+    
     def esegui_turno(self, input_utente: str, session_id: str):
         try:
             # 1. Recupero stato

@@ -77,6 +77,18 @@ with st.sidebar:
         inv = stato.get("inventory", [])
         st.info(f"🎒 Zaino:\n{', '.join(inv) if inv else 'Vuoto'}")
         
+        # --- NUOVO: DIARIO DI VIAGGIO (RIASSUNTO) ---
+        st.markdown("---")
+        st.subheader("📜 Diario di Viaggio")
+        if st.button("Genera Riassunto", use_container_width=True):
+            with st.spinner("Il Bardo Oscuro sta scrivendo..."):
+                riassunto = engine.genera_riassunto(st.session_state.session_id)
+                st.session_state.ultimo_riassunto = riassunto
+        
+        # Se c'è un riassunto generato in questa sessione, lo mostriamo
+        if st.session_state.get("ultimo_riassunto"):
+            st.success(st.session_state.ultimo_riassunto)
+        
         st.markdown("---")
         st.caption(f"ID: `{st.session_state.session_id}`")
         if st.button("🚪 Abbandona", type="primary", use_container_width=True):
